@@ -41,5 +41,8 @@ model = convert_to_analog(
 This layer supports `torch.compile` except when input range learning is enabled since the first `rpu_config.pre_post.input_range.init_from_data`
 many samples coming into the layer are used to update the input range in-place which is not supported in torch dynamo.
 
+## Reference 📖
+Coming soon.
+
 ## License 🔏
 Please see the LICENSE file.
