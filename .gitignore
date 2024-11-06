@@ -5,7 +5,6 @@
 
 # Don't upload figures and data
 **.pdf
-**.png
 **.mat
 **.svg
 **.code-workspace
