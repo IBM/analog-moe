@@ -2,7 +2,10 @@ from typing import Any
 import dill
 import torch
 from huggingface_hub import HfApi, hf_hub_download
-from aihwkit.nn.conversion import convert_to_analog
+try:
+    from aihwkit.nn.conversion import convert_to_analog
+except:
+    print("WARNING: Could not load AIHWKIT")
 
 
 def save_analog_model(model: Any, name: str, token: str = None):

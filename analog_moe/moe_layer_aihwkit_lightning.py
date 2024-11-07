@@ -129,12 +129,7 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
             module: The module to move to the meta class.
 
         """
-        module.keys.data = module.keys.data.to(device="meta")
-        module.values.data = module.values.data.to(device="meta")
-        module.expert_sel.data = module.expert_sel.data.to(device="meta")
-        if module.bias is not None:
-            module.bias.data = module.bias.data.to(device="meta")
-            module.o_bias.data = module.o_bias.data.to(device="meta")
+        module = module.to(device="meta")
 
     @classmethod
     def from_digital(

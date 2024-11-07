@@ -4,8 +4,14 @@ from dataclasses import dataclass
 import triton
 import triton.language as tl
 
-from aihwkit.simulator.configs import InputRangeParameter, NoiseManagementType
-from aihwkit.simulator.parameters import IOParameters
+HAS_AIHWKIT = True
+try:
+    from aihwkit.simulator.configs import InputRangeParameter, NoiseManagementType
+    from aihwkit.simulator.parameters import IOParameters
+except:
+    print("WARNING: Could not load aihwkit.")
+    HAS_AIHWKIT = False
+
 
 # Based on https://github.com/openai/triton/blob/main/python/tutorials/03-matrix-multiplication.py
 # Based on https://github.com/RobertCsordas/moe_layer
@@ -703,8 +709,8 @@ class CVMM(torch.autograd.Function):
         out_index: Optional[torch.Tensor] = None,
         reduction_weight: Optional[torch.Tensor] = None,
         out_noise: Optional[torch.Tensor] = None,
-        ir_params: Optional[InputRangeParameter] = None,
-        io_params: Optional[IOParameters] = None,
+        ir_params: Optional["InputRangeParameter"] = None,
+        io_params: Optional["IOParameters"] = None,
     ):
         # ctx.save_for_backward(x, keys, sel, sel_index, out_index, reduction_weight, input_ranges)
         out_type = torch.float16 if torch.is_autocast_enabled() else x.dtype
@@ -726,6 +732,7 @@ class CVMM(torch.autograd.Function):
             else:
                 abs_max = x.abs().amax(-1, keepdim=True)
         else:
+            assert HAS_AIHWKIT, "AIHWKIT is not installed"
             if io_params is not None and not io_params.is_perfect and io_params.noise_management == NoiseManagementType.ABS_MAX:
                 abs_max = x.abs().amax(-1, keepdim=True)
             else:
@@ -773,7 +780,7 @@ class CVMM(torch.autograd.Function):
         x, keys, sel, sel_index, out_index, reduction_weight, broadcasted_input_ranges, res_into_reduction = ctx.saved_tensors
         keys_dt = keys
 
-        ir_params: InputRangeParameter = ctx.ir_params
+        ir_params: "InputRangeParameter" = ctx.ir_params
         
         if reduction_weight is not None:
             # forward (:p2) [bsz,seq_len,k,d_exp] -> (values) [bsz,seq_len,k,d_model] (:z) -> (w_red) [bsz,seq_len,d_model] (:y) -> ...
