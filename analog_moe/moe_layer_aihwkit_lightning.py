@@ -284,7 +284,7 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
                         self.n_experts
                     )
                     if (stds > 0.0).any():
-                        self.input_range.data[ir_idx] = (
+                        self.input_range.data[ir_idx][stds > 0] = (
                             self.input_range.data[ir_idx][stds > 0] * idx + ir_params.init_std_alpha * stds[stds > 0]
                         ) / (idx + 1)
                         self.input_range_update_idx.data += 1
