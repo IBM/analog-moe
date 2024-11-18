@@ -1,13 +1,9 @@
-from typing import Optional
-from torch import (
-    Tensor,
-    no_grad,
-    randn_like,
-    randn,
-    full,
-    tensor,
-)
+from typing import Optional, OrderedDict, Union
+import re
+from functools import partial
+from torch import Tensor, no_grad, randn_like, randn, full, tensor, zeros, stack, concat
 from torch.nn import Linear, Parameter
+import torch.nn.functional as F
 
 from sigma_moe.moe_layer import SigmaMoELayer
 
@@ -20,12 +16,119 @@ from aihwkit_lightning.simulator.parameters.enums import (
 )
 from aihwkit_lightning.simulator.parameters import WeightModifierParameter
 from aihwkit_lightning.nn.modules.torch_utils.torch_linear import UniformQuantize
+from aihwkit_lightning.nn.conversion import convert_to_analog
 
-from .triton_src.cvmm import CVMM, CVMMSel, cvmm_std
+HAS_TRITON = True
+try:
+    from .triton_src.cvmm import CVMM, CVMMSel, cvmm_std
+except:
+    print("WARNING: Could not load triton.")
+    HAS_TRITON = False
 
 
 class MoEConifgError(Exception):
     """Exceptions related to MoE configuration."""
+
+
+def non_traceable_to_traceable(state_dict: OrderedDict, prefix: str):
+    """Convert non-traceable state dict into traceable state dict in-place"""
+    input_range = state_dict[prefix + "input_range"]
+    update_idx = state_dict[prefix + "input_range_update_idx"]
+    n_experts = input_range.size(1)
+    device = input_range.device
+    dtype = input_range.dtype
+    for i in range(n_experts):
+        state_dict[prefix + f"keys.{i}.input_range"] = input_range[0, i].view(
+            1,
+        )
+        state_dict[prefix + f"keys.{i}.input_range_update_idx"] = update_idx.view(
+            1,
+        )
+        state_dict[prefix + f"keys.{i}.x_min"] = zeros((1,), device=device, dtype=dtype)
+        state_dict[prefix + f"keys.{i}.x_max"] = zeros((1,), device=device, dtype=dtype)
+        state_dict[prefix + f"values.{i}.input_range"] = input_range[1, i].view(
+            1,
+        )
+        state_dict[prefix + f"values.{i}.input_range_update_idx"] = update_idx.view(
+            1,
+        )
+        state_dict[prefix + f"values.{i}.x_min"] = zeros(
+            (1,), device=device, dtype=dtype
+        )
+        state_dict[prefix + f"values.{i}.x_max"] = zeros(
+            (1,), device=device, dtype=dtype
+        )
+
+    state_dict.pop(prefix + "input_range")
+    state_dict.pop(prefix + "input_range_update_idx")
+
+
+def traceable_to_non_traceable(state_dict: OrderedDict, prefix: str):
+    """Convert traceable to non-traceable state dict"""
+    key_value_x_names = [
+        k
+        for k in state_dict
+        if re.match(rf"^{re.escape(prefix)}(keys|values)\.\d+\.(x_min|x_max)$", k)
+    ]
+    update_idx_names = [
+        k
+        for k in state_dict
+        if re.match(
+            rf"^{re.escape(prefix)}(keys|values)\.\d+\.input_range_update_idx$", k
+        )
+    ]
+    key_ir_names = [
+        k
+        for k in state_dict
+        if re.match(rf"^{re.escape(prefix)}keys\.\d+\.input_range$", k)
+    ]
+    values_ir_names = [
+        k
+        for k in state_dict
+        if re.match(rf"^{re.escape(prefix)}values\.\d+\.input_range$", k)
+    ]
+    input_range = stack(
+        [
+            concat([state_dict[k] for k in key_ir_names]),
+            concat([state_dict[k] for k in values_ir_names]),
+        ]
+    )
+    keys_to_delete = [
+        *key_ir_names,
+        *values_ir_names,
+        *key_value_x_names,
+        *update_idx_names,
+    ]
+    state_dict[prefix + "input_range"] = input_range
+    state_dict[prefix + "input_range_update_idx"] = state_dict[update_idx_names[0]]
+    for key_to_delete in keys_to_delete:
+        state_dict.pop(key_to_delete)
+
+
+def load_state_dict_pre_hook(
+    state_dict,
+    prefix,
+    local_metadata,
+    strict,
+    missing_keys,
+    unexpected_keys,
+    error_msgs,
+    traceable,
+):
+    has_ir = state_dict._metadata[prefix]["rpu_config"].pre_post.input_range.enable
+    if not has_ir:
+        return
+
+    if has_ir and prefix + "input_range" in state_dict:
+        state_dict_is_for_non_traceable = True
+    else:
+        state_dict_is_for_non_traceable = False
+
+    if traceable and state_dict_is_for_non_traceable:
+        # convert state dict to traceable
+        non_traceable_to_traceable(state_dict=state_dict, prefix=prefix)
+    elif not traceable and not state_dict_is_for_non_traceable:
+        traceable_to_non_traceable(state_dict=state_dict, prefix=prefix)
 
 
 class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
@@ -52,38 +155,56 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
         assert (
             self.rpu_config.forward.out_res == -1
         ), "out_res must be -1.0, i.e. full precision"
-        assert self.rpu_config.mapping.max_input_size <= 0, "max_input_size must be <= 0"
+        assert (
+            self.rpu_config.mapping.max_input_size <= 0
+        ), "max_input_size must be <= 0"
 
-        # initialize the input ranges
-        self.input_range = None
-        ir_params = self.rpu_config.pre_post.input_range
-        if ir_params.enable:
-            self.input_range_update_idx = Parameter(tensor(0., requires_grad=False))
-            if ir_params.learn_input_range:
-                self.input_range = Parameter(
-                    full(
+        self._register_load_state_dict_pre_hook(
+            partial(load_state_dict_pre_hook, traceable=self.traceable)
+        )
+        if self.traceable:
+            convert_to_analog(
+                self, rpu_config=rpu_config, inplace=True, ensure_analog_root=False
+            )
+        else:
+            # initialize the input ranges
+            self.input_range = None
+            ir_params = self.rpu_config.pre_post.input_range
+            if ir_params.enable:
+                self.input_range_update_idx = Parameter(
+                    tensor(0.0, requires_grad=False)
+                )
+                if ir_params.learn_input_range:
+                    self.input_range = Parameter(
+                        full(
+                            (2, self.n_experts),
+                            ir_params.init_value,
+                            requires_grad=True,
+                        )
+                    )
+                else:
+                    input_range = full(
                         (2, self.n_experts),
                         ir_params.init_value,
-                        requires_grad=True,
+                        requires_grad=False,
                     )
-                )
-            else:
-                input_range = full(
-                    (2, self.n_experts),
-                    ir_params.init_value,
-                    requires_grad=False,
-                )
-                if hasattr(self, "input_range") and self.input_range is None:
-                    delattr(self, "input_range")
-                self.register_buffer("input_range", input_range)  # type: ignore
+                    if hasattr(self, "input_range") and self.input_range is None:
+                        delattr(self, "input_range")
+                    self.register_buffer("input_range", input_range)  # type: ignore
 
-        self.set_weights(
-            expert_sel=self.expert_sel,
-            keys=self.keys,
-            values=self.values,
-            bias=self.bias,
-            o_bias=self.o_bias,
-        )
+            self.expert_sel = convert_to_analog(
+                self.expert_sel,
+                rpu_config=rpu_config,
+                inplace=False,
+                ensure_analog_root=False,
+            )
+            self.set_weights(
+                expert_sel=self.expert_sel,
+                keys=self.keys,
+                values=self.values,
+                bias=self.bias,
+                o_bias=self.o_bias,
+            )
 
     @classmethod
     def to_digital(cls, module: "AnalogSigmaMoELayerAIHWKITLightning") -> SigmaMoELayer:
@@ -184,7 +305,8 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
 
     @staticmethod
     def modify_weight(
-        inp_weight: Tensor, modifier: WeightModifierParameter,
+        inp_weight: Tensor,
+        modifier: WeightModifierParameter,
     ) -> Tensor:
         """Modifies weights in-place, so .clone() before passing the weights here.
 
@@ -252,8 +374,35 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
             raise ConfigError(f"Weight modifier {modifier} not supported")
         return inp_weight
 
+    def compute_scores(
+        self,
+        inp: Tensor,
+        index: Union["CVMMSel", Tensor],
+        expert_scores: Optional[Tensor] = None,
+    ) -> Tensor:
+        IS_CUDA = inp.is_cuda
+        if IS_CUDA:
+            scores = self.cvmm_wrapper(inp, index, self.keys)
+            if self.bias is not None:
+                scores = scores + self.bias[index.raw_sel]
+        else:
+            raise MoEConifgError(
+                "Analog MoE executed on CPU in non-traceable mode. Please instantiate in "
+                ""
+                """traceable=True mode or run on GPU."""
+            )
 
-    def cvmm_wrapper(self, inputs: Tensor, sel_indices: CVMMSel, weights: Tensor):
+        scores = self.activation(scores)
+        if expert_scores is not None:
+            scores = scores * expert_scores[..., None]
+
+        if self.dropout > 0:
+            # Standard dropout on the "up-projected scores"
+            scores = F.dropout(scores, self.dropout, training=self.training)
+
+        return scores
+
+    def cvmm_wrapper(self, inputs: Tensor, sel_indices: "CVMMSel", weights: Tensor):
         """
         TODO
 
@@ -278,18 +427,16 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
                 idx = self.input_range_update_idx
                 if idx < ir_params.init_from_data:
                     stds = cvmm_std(
-                        inputs,
-                        sel_indices.sel_index,
-                        sel_indices.sel,
-                        self.n_experts
+                        inputs, sel_indices.sel_index, sel_indices.sel, self.n_experts
                     )
                     if (stds > 0.0).any():
                         self.input_range.data[ir_idx] = (
-                            self.input_range.data[ir_idx][stds > 0] * idx + ir_params.init_std_alpha * stds[stds > 0]
+                            self.input_range.data[ir_idx][stds > 0] * idx
+                            + ir_params.init_std_alpha * stds[stds > 0]
                         ) / (idx + 1)
                         self.input_range_update_idx.data += 1
                     self.input_range.data = self.input_range.data.abs()
-            
+
             input_ranges = self.input_range[ir_idx]
             broadcasted_input_ranges = input_ranges[sel_indices.sel]
 
@@ -315,10 +462,7 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
             )
 
         out_noise = None
-        if (
-            self.training
-            and self.rpu_config.forward.out_noise > 0
-        ):
+        if self.training and self.rpu_config.forward.out_noise > 0:
             # [bsz, seq_len, top-k, d_out]
             out_noise = randn(
                 (*inputs.shape[:2], self.n_heads, weights.shape[-1]),
@@ -326,7 +470,7 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
             )
             # the inputs into the MVM will be in [-1, 1] range, but the weights are not normalized
             # so we need to scale the noise by the abs max
-            if self.rpu_config.forward.out_noise_per_column:
+            if self.rpu_config.forward.out_noise_per_channel:
                 # scale by abs_max of weight channels
                 assumed_wmax = weights.abs().amax(1)
             else:
@@ -366,7 +510,9 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
             self.clip_weights(self.rpu_config.clip)
 
     @no_grad()
-    def clip_weights(self,) -> None:
+    def clip_weights(
+        self,
+    ) -> None:
         """Clip the weights."""
         clip_type = self.rpu_config.clip.type
         clip_sigma = self.rpu_config.clip.sigma
@@ -380,7 +526,10 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
         sigma_std_values = clip_sigma * self.values.std(
             (1, 2) if clip_type == WeightClipType.LAYER_GAUSSIAN else 1, keepdim=True
         )
-        if clip_type in [WeightClipType.LAYER_GAUSSIAN, WeightClipType.LAYER_GAUSSIAN_PER_CHANNEL]:
+        if clip_type in [
+            WeightClipType.LAYER_GAUSSIAN,
+            WeightClipType.LAYER_GAUSSIAN_PER_CHANNEL,
+        ]:
             self.keys.data.clamp_(-sigma_std_keys, sigma_std_keys)
             self.values.data.clamp_(-sigma_std_values, sigma_std_values)
         else:
@@ -392,10 +541,23 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
         destination._metadata[prefix.split(".")[0]]["rpu_config"] = self.rpu_config
 
     def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
     ):
         super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
         )
         if "rpu_config" in local_metadata:
             self.rpu_config = local_metadata["rpu_config"]
