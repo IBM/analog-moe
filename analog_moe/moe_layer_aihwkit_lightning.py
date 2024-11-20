@@ -115,7 +115,7 @@ def load_state_dict_pre_hook(
     error_msgs,
     traceable,
 ):
-    has_ir = state_dict._metadata[prefix]["rpu_config"].pre_post.input_range.enable
+    has_ir = any(["input_range" in k for k in state_dict])
     if not has_ir:
         return
 
@@ -272,6 +272,7 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
             v_dim=module.v_dim,
             sinkhorn_n_iters=module.sinkhorn_n_iters,
             expert_dropout=module.expert_dropout,
+            traceable=module.traceable
         )
         analog_layer.set_weights(
             expert_sel=module.expert_sel,
@@ -280,7 +281,7 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
             bias=module.bias,
             o_bias=module.o_bias,
         )
-        return analog_layer.to(module.keys.device)
+        return analog_layer.to(module.expert_sel.weight.device)
 
     def set_weights(
         self,
@@ -295,11 +296,17 @@ class AnalogSigmaMoELayerAIHWKITLightning(AnalogLayerBase, SigmaMoELayer):
         Args:
             expert_sel: the weight tensor
         """
-        self.expert_sel.load_state_dict(expert_sel.state_dict())
-        self.keys.data = keys.detach().clone()
-        self.values.data = values.detach().clone()
-        if bias is not None:
-            self.bias.data = bias.detach().clone()
+        self.expert_sel.weight.data = expert_sel.weight.detach().clone()
+        if expert_sel.bias is not None:
+            self.expert_sel.bias.data = expert_sel.bias.detach().clone()
+        if self.traceable:
+            self.keys.load_state_dict(keys.state_dict(), strict=False)
+            self.values.load_state_dict(values.state_dict(), strict=False)
+        else:
+            self.keys.data = keys.detach().clone()
+            self.values.data = values.detach().clone()
+            if bias is not None:
+                self.bias.data = bias.detach().clone()
         if o_bias is not None:
             self.o_bias.data = o_bias.detach().clone()
 
