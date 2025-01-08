@@ -2,7 +2,7 @@
 
 ### Julian Büchel, Athanasios Vasilopoulos, William Andrew Simon, Irem Boybat, HsinYu Tsai, Geoffrey W. Burr, Hernan Castro, Bill Filipiak, Manuel Le Gallo, Abbas Rahimi, Vijay Narayanan, Abu Sebastian
 
-_Nature Computational Science, 2024_ [[Article]](http://example.com) [[Preprint]](http://example.com)
+_Nature Computational Science, 2024_ [[Article]](https://www.nature.com/articles/s43588-024-00753-x#Sec18)
 
 <div align="center">
   <img src='figures/header.png' width="90%"/>
@@ -42,7 +42,30 @@ This layer supports `torch.compile` except when input range learning is enabled 
 many samples coming into the layer are used to update the input range in-place which is not supported in torch dynamo.
 
 ## Reference 📖
-Coming soon.
+```
+@Article{Büchel2025,
+  author={B{\"u}chel, Julian
+  and Vasilopoulos, Athanasios
+  and Simon, William Andrew
+  and Boybat, Irem
+  and Tsai, HsinYu
+  and Burr, Geoffrey W.
+  and Castro, Hernan
+  and Filipiak, Bill
+  and Le Gallo, Manuel
+  and Rahimi, Abbas
+  and Narayanan, Vijay
+  and Sebastian, Abu},
+  title={Efficient scaling of large language models with mixture of experts and 3D analog in-memory computing},
+  journal={Nature Computational Science},
+  year={2025},
+  month={Jan},
+  day={08},
+  issn={2662-8457},
+  doi={10.1038/s43588-024-00753-x},
+  url={https://doi.org/10.1038/s43588-024-00753-x}
+}
+```
 
 ## License 🔏
 Please see the LICENSE file.
