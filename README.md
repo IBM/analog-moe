@@ -2,7 +2,7 @@
 
 ### Julian Büchel, Athanasios Vasilopoulos, William Andrew Simon, Irem Boybat, HsinYu Tsai, Geoffrey W. Burr, Hernan Castro, Bill Filipiak, Manuel Le Gallo, Abbas Rahimi, Vijay Narayanan, Abu Sebastian
 
-_Nature Computational Science, 2024_ [[Article]](https://www.nature.com/articles/s43588-024-00753-x#Sec18)
+_Nature Computational Science, 2025_ [[Article]](https://www.nature.com/articles/s43588-024-00753-x#Sec18)
 
 <div align="center">
   <img src='figures/header.png' width="90%"/>
